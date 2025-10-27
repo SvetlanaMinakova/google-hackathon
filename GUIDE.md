@@ -1,6 +1,6 @@
 # How to Start
 
-## Steps 
+## Steps
 
 - Install uv
 - Install make
@@ -11,3 +11,5 @@
 - Select defaults, the only exception is region - use eu-west4
 - Run `gcloud auth application-default login --no-launch-browser` and follow instructions
 - The right project should be set, verify using `gcloud config get-value project`
+- Create `.env` file `echo 'GOOGLE_API_KEY="YOUR_API_KEY"' > .env`
+- Run `uv sync`
