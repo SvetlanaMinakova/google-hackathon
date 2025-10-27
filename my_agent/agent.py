@@ -40,5 +40,5 @@ root_agent = Agent(
                 "background and vivid description of character appearance.\n"
                 "When the description is generated use 'generate_image' tool "
                 "to generate the image of the character",
-    tools = [generate_image]
+    tools=[generate_image]
 )
