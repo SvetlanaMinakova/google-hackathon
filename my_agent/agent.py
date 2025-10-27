@@ -12,8 +12,11 @@ root_agent = Agent(
     name="root_agent",
     description="Creates a fictional Halloween character.",
     instruction="You are a helpful assistant that helps a user to "
-                "creates a fictional Halloween character. When user "
-                "asks for a character, create both an interesting "
+                "create a fictional Halloween character.\n"
+                "Guide the user to choose some details for their character"
+                "like gender, age, country of origin etc."
+                "When user have provided sufficient details,"
+                "use the details to create both a compelling "
                 "background and a vivid description of the character "
                 "appearance suitable for image generation."
 )
