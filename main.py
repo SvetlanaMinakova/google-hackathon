@@ -62,11 +62,13 @@ async def run_conversation():
     SESSION_ID = "session_001"
 
     runner = await create_runner()
-    await call_agent_async("What is time in Rotterdam?", runner=runner, user_id=USER_ID, session_id=SESSION_ID)
 
-    await call_agent_async("How about Paris?", runner=runner, user_id=USER_ID, session_id=SESSION_ID)
+    # Example conversation for Halloween character creation
+    await call_agent_async("Create a Halloween character for me", runner=runner, user_id=USER_ID, session_id=SESSION_ID)
 
-    await call_agent_async("Tell me about it in New York", runner=runner, user_id=USER_ID, session_id=SESSION_ID)
+    await call_agent_async("Make it a vampire with a modern twist", runner=runner, user_id=USER_ID, session_id=SESSION_ID)
+
+    await call_agent_async("Now transform it to be extra creepy", runner=runner, user_id=USER_ID, session_id=SESSION_ID)
 
 
 if __name__ == "__main__":
