@@ -4,6 +4,7 @@ import google.genai.types as types
 from google import genai
 import uuid
 import random
+from datetime import datetime
 
 
 # Halloween character types for random selection
@@ -13,9 +14,9 @@ HALLOWEEN_CHARACTERS = [
     "bloodied bride", "possessed doll", "ancient sorcerer", "wailing banshee"
 ]
 
-# Base name for source image artifacts (extension will be added based on upload)
-SOURCE_IMAGE_BASE = "source_image"
-SOURCE_IMAGE_STATE_KEY = "current_source_image_filename"
+# State keys for image management
+UPLOADED_IMAGES_KEY = "uploaded_images_history"  # List of all uploaded images
+CURRENT_IMAGE_INDEX_KEY = "current_image_index"  # Index of the most recent image
 
 
 def get_extension_from_mime(mime_type: str) -> str:
@@ -43,8 +44,7 @@ def get_extension_from_mime(mime_type: str) -> str:
 
 async def debug_context(tool_context: ToolContext) -> str:
     """
-    Debug tool to explore the ToolContext structure and find where uploaded images are stored.
-    Use this to understand how ADK organizes uploaded content.
+    Debug tool to explore the ToolContext structure and uploaded images history.
     """
     info = []
     info.append("=" * 60)
@@ -102,42 +102,25 @@ async def debug_context(tool_context: ToolContext) -> str:
     else:
         info.append("❌ user_content attribute does NOT exist")
     
-    # Check for saved source image artifact
-    info.append("\n--- SAVED SOURCE IMAGE ARTIFACT ---")
-    current_source_filename = tool_context.state.get(SOURCE_IMAGE_STATE_KEY)
-    if current_source_filename:
-        info.append(f"Current source image filename: {current_source_filename}")
-        try:
-            saved_image = await tool_context.load_artifact(current_source_filename)
-            if saved_image:
-                info.append(f"✅ Source image artifact EXISTS")
-                if hasattr(saved_image, 'inline_data') and saved_image.inline_data:
-                    info.append(f"   MIME type: {saved_image.inline_data.mime_type}")
-                    data_size = len(saved_image.inline_data.data)
-                    info.append(f"   Size: {data_size:,} bytes")
-            else:
-                info.append(f"❌ Could not load source image artifact")
-        except Exception as e:
-            info.append(f"❌ Error loading source image: {str(e)}")
+    # Check uploaded images history
+    info.append("\n--- UPLOADED IMAGES HISTORY ---")
+    uploaded_images = tool_context.state.get(UPLOADED_IMAGES_KEY, [])
+    current_index = tool_context.state.get(CURRENT_IMAGE_INDEX_KEY)
+    
+    if uploaded_images:
+        info.append(f"Total uploaded images: {len(uploaded_images)}")
+        info.append(f"Current/Latest image index: {current_index}")
+        info.append("\nImage History:")
+        for img in uploaded_images:
+            marker = " ← LATEST" if img.get('index') == current_index else ""
+            info.append(f"  #{img.get('index')}: {img.get('filename')} ({img.get('mime_type')}){marker}")
+            info.append(f"      Uploaded: {img.get('timestamp', 'unknown')}")
     else:
-        info.append(f"❌ No source image filename stored in state")
+        info.append("No images uploaded yet")
     
     # Check state
     info.append("\n--- SESSION STATE ---")
     info.append(f"State keys: {list(tool_context.state.keys())}")
-    for key, value in tool_context.state.items():
-        if isinstance(value, (str, int, float, bool)):
-            info.append(f"  {key}: {value}")
-    
-    # Check other possible locations for uploaded content
-    info.append("\n--- OTHER ATTRIBUTES ---")
-    possible_attrs = ['message', 'current_turn', 'session', 'invocation_id']
-    for attr in possible_attrs:
-        if hasattr(tool_context, attr):
-            value = getattr(tool_context, attr)
-            info.append(f"{attr}: exists ({type(value).__name__})")
-        else:
-            info.append(f"{attr}: does not exist")
     
     info.append("\n" + "=" * 60)
     
@@ -146,9 +129,8 @@ async def debug_context(tool_context: ToolContext) -> str:
 
 async def save_uploaded_image(tool_context: ToolContext) -> str:
     """
-    Saves the uploaded image as an artifact for reuse across multiple transformations.
-    Each new upload creates a new version of the artifact.
-    The image filename preserves the original file extension.
+    Saves the uploaded image to the history array.
+    Each upload gets a unique index and is stored as a separate artifact.
     
     Returns:
         str: Success or error message
@@ -158,12 +140,18 @@ async def save_uploaded_image(tool_context: ToolContext) -> str:
         if not tool_context.user_content or not tool_context.user_content.parts:
             return "❌ No image found. Please upload a photo first!"
         
+        # Get or initialize the uploaded images history
+        uploaded_images = tool_context.state.get(UPLOADED_IMAGES_KEY, [])
+        
+        # Determine the next index
+        next_index = 1 if not uploaded_images else max(img['index'] for img in uploaded_images) + 1
+        
         image_found = False
         for part in tool_context.user_content.parts:
             if part.inline_data and part.inline_data.mime_type.startswith('image/'):
                 # Get the correct extension from MIME type
                 extension = get_extension_from_mime(part.inline_data.mime_type)
-                artifact_filename = f"{SOURCE_IMAGE_BASE}{extension}"
+                artifact_filename = f"source_image_{next_index}{extension}"
                 
                 # Create artifact with original MIME type and extension
                 image_artifact = types.Part(
@@ -173,20 +161,31 @@ async def save_uploaded_image(tool_context: ToolContext) -> str:
                     )
                 )
                 
-                # Save the artifact (this automatically creates a new version if filename exists)
+                # Save the artifact
                 version = await tool_context.save_artifact(
                     filename=artifact_filename,
                     artifact=image_artifact
                 )
                 
-                # Store the current source image filename in state
-                tool_context.state[SOURCE_IMAGE_STATE_KEY] = artifact_filename
+                # Add to history
+                image_info = {
+                    'index': next_index,
+                    'filename': artifact_filename,
+                    'mime_type': part.inline_data.mime_type,
+                    'timestamp': datetime.now().isoformat(),
+                    'version': version
+                }
+                uploaded_images.append(image_info)
+                
+                # Update state
+                tool_context.state[UPLOADED_IMAGES_KEY] = uploaded_images
+                tool_context.state[CURRENT_IMAGE_INDEX_KEY] = next_index
                 
                 image_found = True
-                print(f"✅ Saved source image as: {artifact_filename} (version {version})")
-                print(f"   MIME type: {part.inline_data.mime_type}")
+                print(f"✅ Saved image #{next_index} as: {artifact_filename}")
+                print(f"   Total images in history: {len(uploaded_images)}")
                 
-                return f"✅ Perfect! I've saved your photo as {artifact_filename} (version {version}). Now I can transform it into different Halloween characters without you needing to upload it again!"
+                return f"✅ Perfect! I've saved your photo as image #{next_index} ({artifact_filename}). You now have {len(uploaded_images)} image(s) in your collection. I can transform any of them - just specify which one, or I'll use the latest!"
         
         if not image_found:
             return "❌ No image found in your message. Please attach a photo!"
@@ -196,52 +195,83 @@ async def save_uploaded_image(tool_context: ToolContext) -> str:
         return f"Error saving image: {str(e)}\n{traceback.format_exc()}"
 
 
+async def list_uploaded_images(tool_context: ToolContext) -> str:
+    """
+    Lists all uploaded images in the history.
+    
+    Returns:
+        str: Formatted list of all uploaded images
+    """
+    try:
+        uploaded_images = tool_context.state.get(UPLOADED_IMAGES_KEY, [])
+        current_index = tool_context.state.get(CURRENT_IMAGE_INDEX_KEY)
+        
+        if not uploaded_images:
+            return "❌ No images uploaded yet. Upload a photo to get started!"
+        
+        result = [f"📸 You have {len(uploaded_images)} image(s) in your collection:\n"]
+        
+        for img in uploaded_images:
+            index = img.get('index')
+            filename = img.get('filename')
+            timestamp = img.get('timestamp', 'unknown time')
+            
+            marker = " ⭐ (latest)" if index == current_index else ""
+            result.append(f"#{index}: {filename}{marker}")
+            result.append(f"   Uploaded: {timestamp}")
+        
+        result.append(f"\n💡 To transform a specific image, just say 'transform image #2 into a vampire' or similar!")
+        result.append(f"💡 If you don't specify, I'll use the latest image (#{current_index}).")
+        
+        return "\n".join(result)
+        
+    except Exception as e:
+        return f"Error listing images: {str(e)}"
+
+
 async def check_for_source_image(tool_context: ToolContext) -> str:
     """
-    Check if there's a saved source image or a newly uploaded image.
-    Always uses the latest version of the saved image.
+    Check if there are saved images or a newly uploaded image.
     
     Returns:
         str: Status message about image availability
     """
     try:
-        # First check if there's a saved artifact (latest version)
-        current_source_filename = tool_context.state.get(SOURCE_IMAGE_STATE_KEY)
-        if current_source_filename:
-            try:
-                # Load without version parameter to get the latest version
-                saved_image = await tool_context.load_artifact(current_source_filename)
-                if saved_image:
-                    return f"✅ Source image is ready ({current_source_filename}, latest version)! You can request any Halloween character transformation."
-            except Exception as e:
-                print(f"Error loading saved image: {e}")
+        # Check uploaded images history
+        uploaded_images = tool_context.state.get(UPLOADED_IMAGES_KEY, [])
+        if uploaded_images:
+            count = len(uploaded_images)
+            current_index = tool_context.state.get(CURRENT_IMAGE_INDEX_KEY)
+            return f"✅ You have {count} image(s) saved! Latest is image #{current_index}. Ready for transformations!"
         
         # Check if there's a newly uploaded image in user_content
         if tool_context.user_content and tool_context.user_content.parts:
             for part in tool_context.user_content.parts:
                 if part.inline_data and part.inline_data.mime_type.startswith('image/'):
-                    return "✅ New image detected! I'll save it so we can use it for multiple transformations."
+                    return "✅ New image detected! I'll save it to your collection so we can use it for transformations."
         
-        return "❌ No image available. Please upload a photo to get started with Halloween transformations!"
+        return "❌ No images available. Please upload a photo to get started with Halloween transformations!"
         
     except Exception as e:
-        return f"Error checking for image: {str(e)}"
+        return f"Error checking for images: {str(e)}"
 
 
 async def transform_to_halloween_character(
     character_type: str,
     character_description: str,
-    tool_context: ToolContext
+    tool_context: ToolContext,
+    image_number: int | None = None
 ) -> str:
     """
     Transform a photo into a specified Halloween character.
-    Always uses the latest version of the saved source image.
-    Falls back to newly uploaded image if no saved image exists.
+    Can transform a specific image by number, or defaults to the latest image.
     
     Args:
         character_type (str): Type of Halloween character (e.g., "vampire", "zombie")
         character_description (str): Detailed description of how the transformation should look
         tool_context (ToolContext): ADK tool context
+        image_number (int | None): Specific image number to transform (e.g., 2 for "image #2").
+                                    If None, uses the latest image.
     
     Returns:
         str: Success message or error description
@@ -252,28 +282,14 @@ async def transform_to_halloween_character(
     image_source = None
     
     try:
-        # STRATEGY 1: Try to load the saved source image artifact (latest version)
-        current_source_filename = tool_context.state.get(SOURCE_IMAGE_STATE_KEY)
-        if current_source_filename:
-            try:
-                # Load without version parameter to automatically get the latest version
-                saved_image = await tool_context.load_artifact(current_source_filename)
-                if saved_image and hasattr(saved_image, 'inline_data') and saved_image.inline_data:
-                    image_part = types.Part(
-                        inline_data=types.Blob(
-                            mime_type=saved_image.inline_data.mime_type,
-                            data=saved_image.inline_data.data
-                        )
-                    )
-                    contents.append(image_part)
-                    image_found = True
-                    image_source = f"saved artifact ({current_source_filename}, latest version)"
-                    print(f"✅ Using saved source image: {current_source_filename} (latest version)")
-            except Exception as e:
-                print(f"Could not load saved artifact, checking user_content: {e}")
+        uploaded_images = tool_context.state.get(UPLOADED_IMAGES_KEY, [])
+        current_index = tool_context.state.get(CURRENT_IMAGE_INDEX_KEY)
         
-        # STRATEGY 2: If no saved image, check user_content for newly uploaded image
-        if not image_found:
+        # Determine which image to use
+        target_index = image_number if image_number is not None else current_index
+        
+        if not uploaded_images:
+            # No saved images, check for newly uploaded image
             if tool_context.user_content and tool_context.user_content.parts:
                 for part in tool_context.user_content.parts:
                     if part.inline_data and part.inline_data.mime_type.startswith('image/'):
@@ -288,9 +304,39 @@ async def transform_to_halloween_character(
                         image_source = "newly uploaded"
                         print(f"✅ Using newly uploaded image from user_content")
                         break
+        else:
+            # Try to find the requested image in history
+            target_image = None
+            for img in uploaded_images:
+                if img['index'] == target_index:
+                    target_image = img
+                    break
+            
+            if not target_image:
+                available_indices = [img['index'] for img in uploaded_images]
+                return f"❌ Image #{target_index} not found. Available images: {', '.join(f'#{i}' for i in available_indices)}"
+            
+            # Load the target image
+            try:
+                saved_image = await tool_context.load_artifact(target_image['filename'])
+                if saved_image and hasattr(saved_image, 'inline_data') and saved_image.inline_data:
+                    image_part = types.Part(
+                        inline_data=types.Blob(
+                            mime_type=saved_image.inline_data.mime_type,
+                            data=saved_image.inline_data.data
+                        )
+                    )
+                    contents.append(image_part)
+                    image_found = True
+                    image_source = f"image #{target_index} ({target_image['filename']})"
+                    print(f"✅ Using {image_source}")
+                else:
+                    return f"❌ Could not load image #{target_index}"
+            except Exception as e:
+                return f"❌ Error loading image #{target_index}: {str(e)}"
         
         if not image_found:
-            return "❌ No image available. Please upload a photo or make sure the source image is saved!"
+            return "❌ No image available. Please upload a photo first!"
         
         # Create the transformation prompt
         transformation_prompt = f"""Transform this person into a {character_type}. 
@@ -327,14 +373,23 @@ Make this a truly terrifying Halloween transformation!"""
                 )
                 # Create a unique filename for this transformation
                 safe_character_name = character_type.replace(" ", "_").replace("/", "_")
-                artifact_filename = f"halloween_{safe_character_name}_{uuid.uuid4().hex[:8]}.png"
+                artifact_filename = f"halloween_{safe_character_name}_img{target_index}_{uuid.uuid4().hex[:8]}.png"
                 
                 await tool_context.save_artifact(
                     filename=artifact_filename,
                     artifact=image_artifact
                 )
                 
-                return f"🎃 Successfully transformed you into a terrifying {character_type}! Check out your spooky new look above!\n\n💡 Want to try a different character? Just ask! I've saved your original photo, so no need to upload it again."
+                image_ref = f"image #{target_index}" if image_number else "your latest image"
+                total_images = len(uploaded_images)
+                
+                suggestion = ""
+                if total_images > 1:
+                    suggestion = f"\n\n💡 You have {total_images} images. Want to try transforming a different one? Just say 'transform image #X into a [character]'!"
+                elif total_images == 0:
+                    suggestion = "\n\n💡 Upload more photos to try different transformations!"
+                
+                return f"🎃 Successfully transformed {image_ref} into a terrifying {character_type}! Check out your spooky new look above!{suggestion}"
         
         return "Image generation completed but no image was returned. This might be due to safety filters."
         
@@ -343,21 +398,26 @@ Make this a truly terrifying Halloween transformation!"""
         return f"Error during transformation: {str(e)}\n\nDetails: {traceback.format_exc()}"
 
 
-async def clear_source_image(tool_context: ToolContext) -> str:
+async def clear_image_history(tool_context: ToolContext) -> str:
     """
-    Clears the saved source image reference from state.
-    The next uploaded image will become the new source image.
+    Clears all uploaded images from history.
     
     Returns:
         str: Confirmation message
     """
     try:
-        if SOURCE_IMAGE_STATE_KEY in tool_context.state:
-            old_filename = tool_context.state[SOURCE_IMAGE_STATE_KEY]
-            del tool_context.state[SOURCE_IMAGE_STATE_KEY]
-            return f"✅ Cleared reference to {old_filename}. Ready for a new photo! Just upload a new image and I'll save it as the new source."
+        uploaded_images = tool_context.state.get(UPLOADED_IMAGES_KEY, [])
+        count = len(uploaded_images)
+        
+        if count > 0:
+            # Clear the state
+            tool_context.state[UPLOADED_IMAGES_KEY] = []
+            if CURRENT_IMAGE_INDEX_KEY in tool_context.state:
+                del tool_context.state[CURRENT_IMAGE_INDEX_KEY]
+            
+            return f"✅ Cleared {count} image(s) from history. Ready for fresh uploads!"
         else:
-            return "✅ No source image was set. Ready for you to upload a photo!"
+            return "✅ No images to clear. Ready for you to upload photos!"
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -365,73 +425,87 @@ async def clear_source_image(tool_context: ToolContext) -> str:
 root_agent = Agent(
     model="gemini-2.5-flash",
     name="root_agent",
-    description="Creates Halloween characters and transforms photos into spooky personas. Preserves image format and supports versioning.",
-    instruction="""You are a Halloween Character Transformer with intelligent image management.
+    description="Creates Halloween characters and transforms photos. Maintains history of all uploaded images for flexible transformations.",
+    instruction="""You are a Halloween Character Transformer with advanced image history management.
 
 🔍 DEBUG MODE:
 - When user says "debug", call 'debug_context' to show system information
 
-📸 IMAGE MANAGEMENT:
-- Uploaded images are saved with their original extension (.jpg, .png, .gif, etc.)
-- Each new upload creates a new VERSION of the source image
-- The system ALWAYS uses the LATEST version automatically
-- Users can upload new photos anytime - they replace the previous one
+📸 IMAGE HISTORY SYSTEM:
+- Every uploaded image is saved with a unique number (#1, #2, #3, etc.)
+- Users can transform ANY previously uploaded image by number
+- If no number specified, use the LATEST image
+- Call 'list_uploaded_images' to show all available images
 
-🎃 TRANSFORMATION WORKFLOW:
+🎃 WORKFLOW:
 
 STEP 1: IMAGE UPLOAD
 - When user uploads an image, IMMEDIATELY call 'save_uploaded_image'
-- This saves it with proper extension and versioning
-- Confirm: "Great! I've saved your [extension] photo (version X)"
+- Confirm: "Saved as image #X! You now have Y images in your collection."
 
-STEP 2: CHARACTER SELECTION
-- Ask user for preferences or offer to surprise them
-- Character types: """ + ", ".join(HALLOWEEN_CHARACTERS) + """
-- Create vivid backstory (2-3 sentences):
-  * Origin story
-  * Supernatural powers
-  * Terrifying features
+STEP 2: SHOW AVAILABLE IMAGES (if user asks)
+- Call 'list_uploaded_images' to show all images with their numbers
+- Explain they can reference any image by number
 
 STEP 3: TRANSFORMATION
-- Call 'transform_to_halloween_character' with detailed description
-- The tool automatically uses the latest version of the saved image
-- Remind user: "Want another character? Just ask - no need to re-upload!"
+- If user says "transform image #2 into a vampire":
+  * Extract the number: 2
+  * Call transform_to_halloween_character with image_number=2
+- If user says "transform me into a zombie" (no number):
+  * Call transform_to_halloween_character with image_number=None (uses latest)
+- If user uploads multiple images and asks for transformation:
+  * Ask which image they want transformed, or offer to use the latest
 
-🔄 MULTIPLE TRANSFORMATIONS:
-- For second, third, fourth transformations: just ask for new character
-- Call 'transform_to_halloween_character' directly
-- System automatically uses the latest saved image
-- User can try unlimited characters without re-uploading
+🎯 CHARACTER TYPES:
+""" + ", ".join(HALLOWEEN_CHARACTERS) + """
 
-📤 NEW PHOTO:
-- If user uploads a new photo, call 'save_uploaded_image'
-- This creates a NEW VERSION automatically
-- Confirm: "Got your new photo (version X)! Ready for transformations."
+📝 TRANSFORMATION RULES:
+When calling transform_to_halloween_character:
+- ALWAYS provide image_number parameter
+- If user specified a number (e.g., "second image", "image 3", "#2"): extract it and pass it
+- If no number specified: pass image_number=None (uses latest)
 
-🎯 CHARACTER DESCRIPTION REQUIREMENTS:
-Must include:
+Examples of extracting image numbers:
+- "transform the second picture" → image_number=2
+- "use image #3" → image_number=3  
+- "transform the first one" → image_number=1
+- "make me a vampire" → image_number=None (latest)
+
+🎨 CHARACTER DESCRIPTIONS must include:
 - Skin tone/texture with specific colors
 - Eye characteristics (color, glow, shape)
-- Hair style and color
-- Clothing style and colors with details
-- Special features (fangs, scars, etc.)
+- Hair style and color details
+- Clothing style with colors and textures
+- Special features (fangs, scars, claws, etc.)
 - Atmospheric elements (fog, lighting, background)
 - Overall mood and color palette
 
-Example:
-"Pale grey-blue skin with visible veins, glowing amber eyes with reptilian pupils, long matted black hair with silver streaks, tattered Victorian mourning dress in deep purple and black with cobweb lace, elongated fingers with black nails, surrounded by swirling green mist and moonlit graveyard atmosphere with twisted trees"
+Example description:
+"Decaying grey-green skin with visible wounds, milky white eyes with no pupils, matted blood-stained hair in patches, torn and dirty clothing hanging in shreds, exposed bones on hands and arms with blackened fingernails, surrounded by thick green fog and dark graveyard atmosphere with tombstones and dead trees"
+
+📊 USER QUERIES TO HANDLE:
+- "How many images do I have?" → call list_uploaded_images
+- "Show my images" → call list_uploaded_images
+- "Transform the second one" → extract number=2, call transform
+- "Use my first photo as a witch" → number=1, character="witch"
+- "Clear my images" → call clear_image_history
+
+💡 HELPFUL TIPS TO SHARE:
+- Mention they can upload multiple photos and transform each one differently
+- Remind them they can reference any previous image by number
+- If they have multiple images, suggest trying different characters on different photos
 
 🗑️ RESET:
-- If user wants to clear the current image: call 'clear_source_image'
-- Then they can upload a fresh photo
+- If user wants to clear all images: call 'clear_image_history'
 
-🦇 Let's create terrifying transformations! 💀🎃
+🦇 Let's create an amazing collection of spooky transformations! 💀🎃
 """,
     tools=[
         debug_context,
         save_uploaded_image,
+        list_uploaded_images,
         check_for_source_image,
         transform_to_halloween_character,
-        clear_source_image
+        clear_image_history
     ],
 )
